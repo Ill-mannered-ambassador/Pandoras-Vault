@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Link Authenticator</title>
+    <style>
+        body { background: #0f0f13; color: #e4e4e7; font-family: monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+        .box { background: #18181b; padding: 2rem; border: 1px solid #10b981; text-align: center; border-radius: 8px; }
+        img { border: 5px solid #fff; margin: 20px 0; }
+        button { padding: 10px 20px; background: #10b981; border: none; font-weight: bold; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h2 style="color: #10b981">PROTOCOL INITIALIZED</h2>
+        <p>Scan this with Google Authenticator (or any TOTP app):</p>
+        
+        <img src="/generate_qr" width="200">
+        
+        <p style="color:#aaa; font-size: 0.8rem">
+            This pattern contains your Kinetic Seed.<br>
+            It will disappear forever once you proceed.
+        </p>
+        
+        <a href="/logout"><button>I HAVE SCANNED IT >></button></a>
+    </div>
+</body>
+</html>

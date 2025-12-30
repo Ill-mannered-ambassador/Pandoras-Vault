@@ -76,6 +76,85 @@
 </div>
 
 <script>
+    // --- UTILITY: ArrayBuffer to Base64 ---
+    function arrayBufferToBase64(buffer) {
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return window.btoa(binary);
+    }
+
+    // --- RSA KEY GENERATION ---
+    async function generateIdentity(event) {
+        event.preventDefault(); // Stop normal form submission
+        showLoader();
+
+        const form = event.target;
+        const formData = new FormData(form);
+
+        console.log("Generating 2048-bit RSA Keypair...");
+
+        // 1. Generate Key Pair
+        const keyPair = await window.crypto.subtle.generateKey(
+            {
+                name: "RSA-OAEP",
+                modulusLength: 2048,
+                publicExponent: new Uint8Array([1, 0, 1]),
+                hash: "SHA-256"
+            },
+            true,
+            ["encrypt", "decrypt"]
+        );
+
+        // 2. Export Keys
+        const publicKeyBuffer = await window.crypto.subtle.exportKey("spki", keyPair.publicKey);
+        const privateKeyBuffer = await window.crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+
+        const publicKeyB64 = arrayBufferToBase64(publicKeyBuffer);
+        const privateKeyB64 = arrayBufferToBase64(privateKeyBuffer);
+
+        // 3. SAVE PRIVATE KEY LOCALLY (The "Identity")
+        // Server NEVER sees this.
+        localStorage.setItem("my_private_key", privateKeyB64);
+        console.log("Private Key saved to browser storage.");
+
+        // 4. ATTACH PUBLIC KEY TO FORM
+        formData.append("public_key", publicKeyB64);
+
+        // 5. SUBMIT TO SERVER
+        try {
+            const response = await fetch('/signup', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (response.redirected) {
+                window.location.href = response.url;
+            } else {
+                window.location.reload();
+            }
+        } catch (e) {
+            alert("Signup Error: " + e.message);
+            document.getElementById("loader-overlay").classList.add("loader-hidden");
+        }
+    }
+
+    // ATTACH TO SIGNUP FORM
+    // Wait for DOM to load
+    document.addEventListener("DOMContentLoaded", () => {
+        const signupForm = document.querySelector('#signup-box form');
+        if (signupForm) {
+            signupForm.addEventListener('submit', generateIdentity);
+        }
+    });
+
+    // --- UI HELPERS ---
+    window.addEventListener("load", () => setTimeout(() => document.getElementById("loader-overlay").classList.add("loader-hidden"), 800));
+    function showLoader() { document.getElementById("loader-overlay").classList.remove("loader-hidden"); }
+    
     function toggleAuth() {
         document.getElementById('login-box').classList.toggle('hidden');
         document.getElementById('signup-box').classList.toggle('hidden');

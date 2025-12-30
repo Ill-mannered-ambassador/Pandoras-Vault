@@ -6,8 +6,26 @@ import uuid
 from flask import Flask, request, render_template, redirect, url_for, session, flash, send_from_directory, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 
+import qrcode
+import io
+import base64
+from flask import send_file
+
+import boto3
+from botocore.exceptions import NoCredentialsError
+
+
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+# --- SUPABASE CONFIGURATION ---
+S3_BUCKET = "pandoras-vault"  # Make sure you created this bucket in the 'Storage' tab!
+
+# Initialize S3 Client with your specific details
+s3 = boto3.client('s3', 
+                  endpoint_url='https://pxrkpjzhdhvgtcxhmfev.storage.supabase.co/storage/v1/s3', #
+                  aws_access_key_id='bedf6475c7fcd50646c3308d6e7789e5',
+                  aws_secret_access_key='0c43d9ebeb410a5915e8c77dd3863cc081232cfee69395b187779f4a54973dab',
+                  region_name='ap-south-1') #
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -29,17 +47,19 @@ def get_db_connection():
 def init_db():
     conn = sqlite3.connect('woc_vault.db')
     c = conn.cursor()
+    # 1. Add public_key to users
     c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (id TEXT PRIMARY KEY, username TEXT UNIQUE, password TEXT, secret_key TEXT)''')
+                 (id TEXT PRIMARY KEY, username TEXT UNIQUE, password TEXT, secret_key TEXT, public_key TEXT)''')
     
-    # NEW: Added 'role' column (owner, viewer, editor, revoked)
-    # We also track 'source_filename' to group shares together
+    # 2. Add encrypted_key to file_registry
+    # We still use 'filename' as the primary key for the Logical File (User's view)
     c.execute('''CREATE TABLE IF NOT EXISTS file_registry 
                  (filename TEXT PRIMARY KEY, 
                   owner_username TEXT, 
                   shared_from TEXT, 
                   source_filename TEXT,
-                  role TEXT DEFAULT 'owner')''')
+                  role TEXT DEFAULT 'owner',
+                  encrypted_key TEXT)''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS audit_logs 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, owner_username TEXT, 
@@ -84,20 +104,59 @@ def auth(): return render_template('auth.html')
 def signup():
     username = request.form['username']
     password = request.form['password']
-    user_secret_key = f"{username}_{os.urandom(4).hex()}"
-    hashed_pw = generate_password_hash(password)
+    public_key = request.form['public_key']
     
-    print(f"\n[NEW USER] {username} | KEY: {user_secret_key}\n")
+    # 1. Generate the same random secret your C code uses
+    raw_secret = f"{username}_{os.urandom(4).hex()}"
+    hashed_pw = generate_password_hash(password)
     
     try:
         conn = get_db_connection()
-        conn.execute('INSERT INTO users (id, username, password, secret_key) VALUES (?, ?, ?, ?)',
-                     (str(uuid.uuid4()), username, hashed_pw, user_secret_key))
+        conn.execute('INSERT INTO users (id, username, password, secret_key, public_key) VALUES (?, ?, ?, ?, ?)',
+                     (str(uuid.uuid4()), username, hashed_pw, raw_secret, public_key))
         conn.commit()
         conn.close()
-        flash("Account Created.", "success")
-    except Exception as e: flash(str(e), "error")
-    return redirect(url_for('auth'))
+        
+        # 2. Redirect to the QR Setup Page
+        # We store these briefly in session so the next page can generate the QR
+        session['temp_secret'] = raw_secret
+        session['temp_user'] = username
+        return redirect(url_for('setup_2fa'))
+        
+    except Exception as e: 
+        flash(str(e), "error")
+        return redirect(url_for('auth'))
+    
+
+# Route to render the HTML page
+@app.route('/setup_2fa')
+def setup_2fa():
+    if 'temp_secret' not in session: return redirect(url_for('auth'))
+    return render_template('setup_2fa.html')
+
+# Route to generate the actual PNG image
+@app.route('/generate_qr')
+def generate_qr():
+    if 'temp_secret' not in session: return "Error", 400
+    
+    username = session['temp_user']
+    raw_secret = session['temp_secret']
+    
+    # CRITICAL STEP: 
+    # Google Authenticator needs the key in Base32 format.
+    # We are NOT changing the key, just writing it in a different alphabet.
+    b32_secret = base64.b32encode(raw_secret.encode('utf-8')).decode('utf-8')
+    
+    # Standard URI format for Authenticator Apps
+    # This just tells the app: "Here is the secret, use SHA1 (default)"
+    uri = f"otpauth://totp/PandoraVault:{username}?secret={b32_secret}&issuer=PandoraVault"
+    
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf)
+    buf.seek(0)
+    
+    return send_file(buf, mimetype='image/png')
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -161,32 +220,55 @@ def logout():
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'trap_key' not in session: return "Unauthorized", 401
-    file = request.files['file']
-    filename = f"{session['username']}_{int(time.time())}_{file.filename}" 
-    file.save(os.path.join(UPLOAD_FOLDER, filename))
     
+    file = request.files['file']
+    encrypted_key = request.form['encrypted_key']
+    
+    # 1. Generate Unique Name
+    filename = f"{session['username']}_{int(time.time())}_{file.filename}" 
+    
+    # 2. UPLOAD TO AWS S3 (Replaces file.save)
+    try:
+        # We upload the file object directly. 
+        # S3 overwrites if the name exists, but our timestamp prevents collisions.
+        s3.upload_fileobj(file, S3_BUCKET, filename)
+    except Exception as e:
+        return f"Cloud Upload Error: {str(e)}", 500
+    
+    # 3. DATABASE (Exact same as before)
     conn = get_db_connection()
-    # Owner gets 'owner' role, source is self
-    conn.execute('INSERT INTO file_registry (filename, owner_username, shared_from, source_filename, role) VALUES (?, ?, ?, ?, ?)',
-                 (filename, session['username'], "Self", filename, "owner"))
+    conn.execute('INSERT INTO file_registry (filename, owner_username, shared_from, source_filename, role, encrypted_key) VALUES (?, ?, ?, ?, ?, ?)',
+                 (filename, session['username'], "Self", filename, "owner", encrypted_key))
     conn.commit()
     conn.close()
     
-    log_action(filename, session['username'], session['username'], "Created")
+    log_action(filename, session['username'], session['username'], "Created (Cloud)")
     return "OK", 200
 
 @app.route('/download/<filename>')
 def download_file(filename):
     if 'trap_key' not in session: return "Unauthorized", 401
-    # Check permissions
     conn = get_db_connection()
-    perm = conn.execute('SELECT role, owner_username FROM file_registry WHERE filename=?', (filename,)).fetchone()
+    perm = conn.execute('SELECT role, owner_username, source_filename FROM file_registry WHERE filename=?', (filename,)).fetchone()
     conn.close()
     
     if not perm or perm['role'] == 'revoked': return "Access Denied", 403
 
-    log_action(filename, perm['owner_username'], session['username'], "Downloaded")
-    return send_from_directory(UPLOAD_FOLDER, filename)
+    log_action(filename, perm['owner_username'], session['username'], "Downloaded (Cloud)")
+    
+    # SERVE FROM S3
+    try:
+        # 1. Get the object stream from S3
+        file_obj = s3.get_object(Bucket=S3_BUCKET, Key=perm['source_filename'])
+        
+        # 2. Stream it directly to the user
+        return send_file(
+            file_obj['Body'],
+            as_attachment=True,
+            download_name=filename 
+        )
+    except Exception as e:
+        return f"Cloud Retrieval Error: {str(e)}", 404
 
 # --- SHARING & ROLES ---
 
@@ -201,30 +283,29 @@ def get_share_key(target):
 def share_file():
     if 'trap_key' not in session: return "Unauthorized", 401
     
-    file = request.files['file']
+    # Notice: We are NOT getting request.files['file'] anymore. 
+    # We are just trading keys.
     target = request.form['target_user']
     orig_name = request.form['original_filename'] 
+    new_envelope = request.form['encrypted_key'] # <--- NEW: Key encrypted for Target
     
-    # 1. CHECK PERMISSIONS (Changed Logic)
     conn = get_db_connection()
-    # Check if the current user is the owner OR an editor of this file
     perm = conn.execute('SELECT role, source_filename FROM file_registry WHERE filename = ? AND owner_username = ?', 
                         (orig_name, session['username'])).fetchone()
     
-    # If they are not found, or have 'viewer'/'revoked' role, deny access
     if not perm or perm['role'] not in ['owner', 'editor']:
         conn.close()
-        return "Permission Denied: Only Owners and Editors can share.", 403
+        return "Permission Denied", 403
 
-    real_source = perm['source_filename'] # Keep the lineage alive
+    real_source = perm['source_filename']
     
-    # 2. Save new copy for the target
-    new_filename = f"{target}_{int(time.time())}_{file.filename}"
-    file.save(os.path.join(UPLOAD_FOLDER, new_filename))
+    # Create a "Virtual File" for the target. 
+    # It has a unique name in the DB, but points to 'real_source' on disk.
+    # WE DO NOT COPY THE FILE TO DISK.
+    virtual_filename = f"{target}_{int(time.time())}_{orig_name.split('_', 2)[-1]}"
     
-    # 3. Grant 'viewer' role by default
-    conn.execute('INSERT OR REPLACE INTO file_registry (filename, owner_username, shared_from, source_filename, role) VALUES (?, ?, ?, ?, ?)',
-                 (new_filename, target, session['username'], real_source, "viewer"))
+    conn.execute('INSERT OR REPLACE INTO file_registry (filename, owner_username, shared_from, source_filename, role, encrypted_key) VALUES (?, ?, ?, ?, ?, ?)',
+                 (virtual_filename, target, session['username'], real_source, "viewer", new_envelope))
     conn.commit()
     conn.close()
     
@@ -286,8 +367,7 @@ def update_file():
     
     conn = get_db_connection()
     
-    # 1. IDENTIFY THE FILE
-    # Find out who owns this specific file and what its Master Source is
+    # 1. IDENTIFY THE FILE (No changes here)
     target_info = conn.execute('SELECT owner_username, source_filename FROM file_registry WHERE filename=?', 
                                (target_filename,)).fetchone()
     
@@ -297,35 +377,40 @@ def update_file():
         
     source_filename = target_info['source_filename']
     
-    # 2. CHECK PRIVILEGE
-    # Am I the Owner of this specific file?
+    # 2. CHECK PRIVILEGE (No changes here)
     is_owner = (target_info['owner_username'] == session['username'])
     
-    # Am I the Owner or Editor of the MASTER SOURCE?
-    # (If I can edit the Master, I can edit all the copies)
     can_edit_source = conn.execute('''SELECT 1 FROM file_registry 
                                       WHERE filename=? AND owner_username=? 
                                       AND (role='owner' OR role='editor')''', 
                                    (source_filename, session['username'])).fetchone()
                                    
-    # Also check if I'm an assigned editor on the source record
     is_assigned_editor = conn.execute('''SELECT 1 FROM file_registry 
                                          WHERE source_filename=? AND owner_username=? AND role='editor' ''', 
                                       (source_filename, session['username'])).fetchone()
-
     conn.close()
     
     if not is_owner and not can_edit_source and not is_assigned_editor:
         return "Permission Denied", 403
     
-    # 3. OVERWRITE (Hard Delete first to prevent caching issues)
-    save_path = os.path.join(UPLOAD_FOLDER, target_filename)
-    if os.path.exists(save_path): os.remove(save_path)
-    file.save(save_path)
-    
-    print(f"[SYNC] Updated file: {target_filename}")
-    return "Updated", 200
+    # 3. OVERWRITE ON S3 (Replaces local file save)
+    try:
+        # S3 automatically overwrites if the key exists
+        s3.upload_fileobj(file, S3_BUCKET, target_filename)
+        print(f"[SYNC] Cloud file updated: {target_filename}")
+        return "Updated", 200
+    except Exception as e:
+        return f"Cloud Sync Error: {str(e)}", 500
+
+@app.route('/get_public_key/<username>')
+def get_public_key(username):
+    conn = get_db_connection()
+    u = conn.execute('SELECT public_key FROM users WHERE username=?', (username,)).fetchone()
+    conn.close()
+    return u['public_key'] if u else ("Not Found", 404)
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
+
 
