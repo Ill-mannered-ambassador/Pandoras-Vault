@@ -42,7 +42,6 @@ void feistel_block_operate(uint32_t *left, uint32_t *right, uint32_t *keys, int 
     temp = *left; *left = *right; *right = temp;
 }
 
-
 void print_output_as_text(uint32_t L, uint32_t R) {
     char buf[9];
     memcpy(buf, &L, 4);
@@ -58,44 +57,6 @@ void print_output_as_text(uint32_t L, uint32_t R) {
     printf("\"");
 }
 
-/*
-int main() {
-    
-    uint32_t L_orig = 0x62656369; // "iceb"
-    uint32_t R_orig = 0x73677265; // "ergs"
-    
-    uint32_t keys[NUM_ROUNDS];
-    generate_keys("Hunter2", keys);
-    
-    uint32_t decrypt_keys[NUM_ROUNDS];
-    for(int i=0; i<NUM_ROUNDS; i++) decrypt_keys[i] = keys[NUM_ROUNDS - 1 - i];
-
-    //ENCRYPTION PHASE (Simulated Upload)
-    uint32_t L = L_orig, R = R_orig;
-    
-    // MFA is always valid (1) during encryption/upload
-    feistel_block_operate(&L, &R, keys, 1); 
-    
-
-    // DECRYPTION PHASE (Simulated Download)
-    int entered_otp;
-    printf("\nEnter OTP to Decrypt: ");
-    scanf("%d", &entered_otp);
-
-    int mfa_status = (entered_otp == TARGET_OTP) ? 1 : 0;
-    
-    feistel_block_operate(&L, &R, decrypt_keys, mfa_status);
-
-
-    printf("  Hex Output: %08X %08X", L, R);
-    print_output_as_text(L, R);
-    printf("\n");
-    
-
-    return 0;
-}
-
-*/
 
 // 1. ENCRYPT EXPORT
 

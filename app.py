@@ -18,9 +18,8 @@ from botocore.exceptions import NoCredentialsError
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 # --- SUPABASE CONFIGURATION ---
-S3_BUCKET = "pandoras-vault"  # Make sure you created this bucket in the 'Storage' tab!
+S3_BUCKET = "pandoras-vault"  
 
-# Initialize S3 Client with your specific details
 s3 = boto3.client('s3', 
                   endpoint_url='https://pxrkpjzhdhvgtcxhmfev.storage.supabase.co/storage/v1/s3', #
                   aws_access_key_id='bedf6475c7fcd50646c3308d6e7789e5',
@@ -52,7 +51,7 @@ def init_db():
                  (id TEXT PRIMARY KEY, username TEXT UNIQUE, password TEXT, secret_key TEXT, public_key TEXT)''')
     
     # 2. Add encrypted_key to file_registry
-    # We still use 'filename' as the primary key for the Logical File (User's view)
+
     c.execute('''CREATE TABLE IF NOT EXISTS file_registry 
                  (filename TEXT PRIMARY KEY, 
                   owner_username TEXT, 
@@ -142,7 +141,6 @@ def generate_qr():
     username = session['temp_user']
     raw_secret = session['temp_secret']
     
-    # CRITICAL STEP: 
     # Google Authenticator needs the key in Base32 format.
     # We are NOT changing the key, just writing it in a different alphabet.
     b32_secret = base64.b32encode(raw_secret.encode('utf-8')).decode('utf-8')
@@ -235,7 +233,7 @@ def upload_file():
     except Exception as e:
         return f"Cloud Upload Error: {str(e)}", 500
     
-    # 3. DATABASE (Exact same as before)
+    # 3. DATABASE
     conn = get_db_connection()
     conn.execute('INSERT INTO file_registry (filename, owner_username, shared_from, source_filename, role, encrypted_key) VALUES (?, ?, ?, ?, ?, ?)',
                  (filename, session['username'], "Self", filename, "owner", encrypted_key))
@@ -282,12 +280,10 @@ def get_share_key(target):
 @app.route('/share_file', methods=['POST'])
 def share_file():
     if 'trap_key' not in session: return "Unauthorized", 401
-    
-    # Notice: We are NOT getting request.files['file'] anymore. 
-    # We are just trading keys.
+
     target = request.form['target_user']
     orig_name = request.form['original_filename'] 
-    new_envelope = request.form['encrypted_key'] # <--- NEW: Key encrypted for Target
+    new_envelope = request.form['encrypted_key']
     
     conn = get_db_connection()
     perm = conn.execute('SELECT role, source_filename FROM file_registry WHERE filename = ? AND owner_username = ?', 
@@ -298,10 +294,7 @@ def share_file():
         return "Permission Denied", 403
 
     real_source = perm['source_filename']
-    
-    # Create a "Virtual File" for the target. 
-    # It has a unique name in the DB, but points to 'real_source' on disk.
-    # WE DO NOT COPY THE FILE TO DISK.
+
     virtual_filename = f"{target}_{int(time.time())}_{orig_name.split('_', 2)[-1]}"
     
     conn.execute('INSERT OR REPLACE INTO file_registry (filename, owner_username, shared_from, source_filename, role, encrypted_key) VALUES (?, ?, ?, ?, ?, ?)',
@@ -312,8 +305,8 @@ def share_file():
     log_action(real_source, session['username'], session['username'], f"Shared with {target}")
     return "Shared", 200
 
-# NEW: Get list of people who have access to MY file
-# [UPDATED] Get list of ALL people who have access to this file (for Syncing)
+
+# Get list of ALL people who have access to this file (for Syncing)
 @app.route('/get_file_users/<filename>')
 def get_file_users(filename):
     conn = get_db_connection()
@@ -327,7 +320,7 @@ def get_file_users(filename):
     source = rec['source_filename']
     
     # 2. FETCH ALL SHARES (Removed "shared_from" filter)
-    # This ensures Bob sees himself and Eve in the list so he can update their copies too.
+
     shares = conn.execute('''SELECT owner_username, role, filename 
                              FROM file_registry 
                              WHERE source_filename = ?''', 
@@ -367,7 +360,7 @@ def update_file():
     
     conn = get_db_connection()
     
-    # 1. IDENTIFY THE FILE (No changes here)
+    # 1. IDENTIFY THE FILE 
     target_info = conn.execute('SELECT owner_username, source_filename FROM file_registry WHERE filename=?', 
                                (target_filename,)).fetchone()
     
@@ -377,7 +370,7 @@ def update_file():
         
     source_filename = target_info['source_filename']
     
-    # 2. CHECK PRIVILEGE (No changes here)
+    # 2. CHECK PRIVILEGE 
     is_owner = (target_info['owner_username'] == session['username'])
     
     can_edit_source = conn.execute('''SELECT 1 FROM file_registry 
