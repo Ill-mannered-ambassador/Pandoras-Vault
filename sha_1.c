@@ -25,17 +25,13 @@ void sha1_expand_block(const uint8_t* block_64bytes, uint32_t* W) {
 }
 
 void sha1_compress_cycle(uint32_t* W, uint32_t* state) {
-
     uint32_t a = state[0];
     uint32_t b = state[1];
     uint32_t c = state[2];
     uint32_t d = state[3];
     uint32_t e = state[4];
-
     uint32_t f, k, temp;
-
     for (int i = 0; i < 80; i++) {
-        
         if (i <= 19) {
             f = (b & c) | ((~b) & d); 
             k = 0x5A827999;
@@ -52,8 +48,6 @@ void sha1_compress_cycle(uint32_t* W, uint32_t* state) {
             f = b ^ c ^ d;
             k = 0xCA62C1D6;
         }
-
-
         temp = ROTLEFT(a, 5) + f + e + k + W[i];
 
         e = d;
@@ -62,7 +56,6 @@ void sha1_compress_cycle(uint32_t* W, uint32_t* state) {
         b = a;
         a = temp;
     }
-
     state[0] += a;
     state[1] += b;
     state[2] += c;
@@ -101,13 +94,10 @@ void sha1(const uint8_t *message, size_t len, uint8_t *digest) {
                 buffer[63-j] = (bit_len >> (j*8)) & 0xFF;
             }
         }
-
-        // CALL YOUR ENGINE
         sha1_expand_block(buffer, W);
         sha1_compress_cycle(W, state);
     }
 
-    // Output Result
     for (int i = 0; i < 5; i++) {
         digest[i*4]     = (state[i] >> 24) & 0xFF;
         digest[i*4 + 1] = (state[i] >> 16) & 0xFF;
